@@ -1,11 +1,11 @@
 # Bandcamp Collection Downloader
 
-A small Python CLI for downloading purchased items from a Bandcamp fan
-collection using Firefox cookies.
+A Python command-line tool for downloading purchased releases from a Bandcamp
+fan collection.
 
 This is intended as a drop-in, Python-based replacement for the original Java
-`bandcamp-collection-downloader` CLI, with the same cache file format and
-compatible command-line shape:
+`bandcamp-collection-downloader` CLI, with the same cache file format and a
+command-line interface compatible with the original Java tool:
 
 ```bash
 bandcamp_collection_downloader \
@@ -15,24 +15,32 @@ bandcamp_collection_downloader \
   <bandcamp-user>
 ```
 
+It downloads purchased items from a Bandcamp fan collection. Streaming-only
+albums cannot be downloaded.
+
 ## Features
 
-- Automatic Firefox cookie discovery.
-- Native Firefox and Flatpak Firefox support.
-- xdg-document-portal profile support, including `/run/user/.../doc/...` paths.
+- No cookie export required for Firefox users.
+- Firefox profiles are discovered automatically.
+- Supports native Firefox and Firefox Flatpak.
+- Supports xdg-document-portal profile paths such as `/run/user/.../doc/...`.
 - Safe SQLite handling: copies `cookies.sqlite`, `cookies.sqlite-wal`, and
   `cookies.sqlite-shm` to a temporary directory before reading.
 - Strict Bandcamp cookie filtering.
+- Pure Python implementation with no external runtime dependencies.
 - Java-compatible cache at:
 
   ```text
   <download-folder>/bandcamp-collection-downloader.cache
   ```
 
-- Atomic cache appends with locking, flush, and `fsync()`.
 - Cache IDs use the original `p<sitem_id>` format.
+- Atomic cache appends with locking, flush, and `fsync()`.
 - `--jobs` bounded parallel downloads.
-- `.part` resume using HTTP `Range` requests.
+- Interrupted downloads resume automatically using `.part` files and HTTP
+  `Range` requests when supported.
+- Completed downloads are renamed from `.part` only after the transfer
+  completes.
 - Retry policy for `429`, `500`, `502`, `503`, `504`, and network timeout-style
   failures.
 - Dry-run output that shows cache behavior:
@@ -42,18 +50,38 @@ bandcamp_collection_downloader \
   DOWNLOAD  p390186728  Another Album
   ```
 
-## Install
+## Requirements
 
-From a local checkout:
+- Python 3.10+
+- Firefox or Firefox Flatpak with an active Bandcamp login
+
+Currently supported browsers:
+
+- Firefox
+- Firefox Flatpak
+
+Chrome-based browsers are not yet supported.
+
+## Installation
+
+### Option 1: virtual environment, recommended
 
 ```bash
-python3 -m pip install .
+python3 -m venv .venv
+. .venv/bin/activate
+pip install .
 ```
 
-For editable development:
+### Option 2: pipx
 
 ```bash
-python3 -m pip install -e .
+pipx install .
+```
+
+### Option 3: run directly from the source tree
+
+```bash
+python3 -m bandcamp_collection_downloader --download-folder=/path/to/music <bandcamp-user>
 ```
 
 ## Usage
@@ -82,6 +110,20 @@ Use a specific Firefox profile or cookie database:
 bandcamp_collection_downloader --profile /path/to/firefox/profile <bandcamp-user>
 bandcamp_collection_downloader --cookies-sqlite /path/to/cookies.sqlite <bandcamp-user>
 ```
+
+## Migrating From The Java Downloader
+
+No migration is normally required.
+
+This implementation intentionally reuses:
+
+- the existing download directory
+- the existing `bandcamp-collection-downloader.cache`
+- the same common command-line options: `--jobs`, `-f`, and `--download-folder`
+
+Point this downloader at the same download directory and it will continue using
+the existing cache. The cache tracks Bandcamp purchase IDs rather than
+filenames, making it robust against album renames or filename changes.
 
 ## Cookie Discovery
 
@@ -141,6 +183,51 @@ successfully and the `.part` file has been renamed.
 This lets an existing Bandcamp library switch between the Java downloader and
 this Python implementation without losing cache history.
 
+## Sample Output
+
+Dry-run with `--verbose`:
+
+```text
+Loaded cache: 430 entries
+SKIP  p375739204  Example Album
+DOWNLOAD  p390186728  Another Album
+DOWNLOAD  p390237414  Third Album
+Collection items: 433
+Already downloaded: 430
+New downloads: 3
+Succeeded: 0
+Failed: 0
+Elapsed: 00:00:02
+```
+
+Download run with `--verbose`:
+
+```text
+Loaded cache: 430 entries
+downloaded: /path/to/music/Another Album.mp3 (8542212 bytes) from https://...
+downloaded: /path/to/music/Third Album.mp3 (9174820 bytes) from https://...
+Cache updated: p390186728
+Cache updated: p390237414
+Collection items: 432
+Already downloaded: 430
+New downloads: 2
+Succeeded: 2
+Failed: 0
+Elapsed: 00:00:09
+```
+
+## Advanced Usage
+
+`--endpoint` adds an extra Bandcamp API endpoint to try when the logged-in page
+does not expose enough download links. It is mainly a troubleshooting option
+for Bandcamp page/API changes; normal users should not need it.
+
+Example:
+
+```bash
+bandcamp_collection_downloader --endpoint https://bandcamp.com/api/... --dry-run --verbose <bandcamp-user>
+```
+
 ## Privacy
 
 Firefox cookies grant access to your Bandcamp account. Do not commit or share:
@@ -178,3 +265,7 @@ Run a compile check:
 ```bash
 python3 -m compileall -q bandcamp_collection_downloader tests
 ```
+
+## License
+
+MIT
