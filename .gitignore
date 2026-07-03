@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Local/private Bandcamp and Firefox data.
+test-data/
+cookies.sqlite
+cookies.sqlite-*
+*.cookies
+cookies.json
+cookies.txt
+bandcamp-collection-downloader.cache
+*.part
+
+# Local download folders.
+Bandcamp/
+downloads/

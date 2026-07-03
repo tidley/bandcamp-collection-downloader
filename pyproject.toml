@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bandcamp-collection-downloader"
+version = "0.1.0"
+description = "Download Bandcamp purchases using Firefox cookies."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+bandcamp-collection-downloader = "bandcamp_collection_downloader.cli:main"
+bandcamp_collection_downloader = "bandcamp_collection_downloader.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bandcamp_collection_downloader*"]
