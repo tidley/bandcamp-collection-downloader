@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--download-folder", "--out", dest="download_folder", type=Path, default=Path("Bandcamp"), help="Download directory.")
     parser.add_argument("--jobs", type=int, default=4, help="Parallel download jobs.")
     parser.add_argument("-f", "--format", default="mp3-320", help="Download format, e.g. mp3-320, flac, aac-hi, vorbis.")
+    parser.add_argument("--include-preorders", action="store_true", help="Attempt preorders/incomplete releases instead of skipping them up front.")
     parser.add_argument("--dry-run", action="store_true", help="Authenticate and list discovered downloads without downloading.")
     parser.add_argument("--verbose", action="store_true", help="Print profile, cookie, HTTP, and API diagnostics.")
     args = parser.parse_args(argv)
@@ -64,18 +65,28 @@ def main(argv: list[str] | None = None) -> int:
         print("no Bandcamp downloads found; rerun with --verbose and send the diagnostics from this machine", file=sys.stderr)
         return 1
 
-    plan = client.plan_downloads(links, cache)
+    plan = client.plan_downloads(links, cache, include_preorders=args.include_preorders)
+    for link in plan.preorders:
+        _print_preorder(link)
+    for link in plan.incomplete:
+        _print_incomplete(link)
     if args.dry_run:
         for link in plan.skipped:
-            print(f"SKIP  {link.cache_id or '-'}  {link.title}")
+            _print_dry_run_item("SKIP", link, client, args.download_folder)
         for link in plan.pending:
-            print(f"DOWNLOAD  {link.cache_id or '-'}  {link.title}")
+            _print_dry_run_item("DOWNLOAD", link, client, args.download_folder)
         _print_summary(plan.summary, time.monotonic() - started)
         return 0
 
     summary = client.download_plan(plan, args.download_folder, args.jobs, cache)
     _print_summary(summary, time.monotonic() - started)
-    return 0 if summary.failed == 0 and (summary.succeeded or summary.already_downloaded or summary.duplicates) else 1
+    return 0 if summary.failed == 0 and (
+        summary.succeeded
+        or summary.already_downloaded
+        or summary.duplicates
+        or summary.preorders_skipped
+        or summary.incomplete_skipped
+    ) else 1
 
 
 def _list_profiles() -> int:
@@ -95,7 +106,32 @@ def _print_summary(summary: DownloadSummary, elapsed: float) -> None:
     print(f"New downloads: {summary.new_downloads}", file=sys.stderr)
     print(f"Succeeded: {summary.succeeded}", file=sys.stderr)
     print(f"Failed: {summary.failed}", file=sys.stderr)
+    print(f"Preorders skipped: {summary.preorders_skipped}", file=sys.stderr)
+    print(f"Incomplete skipped: {summary.incomplete_skipped}", file=sys.stderr)
     print(f"Elapsed: {_format_elapsed(elapsed)}", file=sys.stderr)
+
+
+def _release_name(link) -> str:
+    return f"{link.artist or 'Unknown Artist'} - {link.title}"
+
+
+def _print_preorder(link) -> None:
+    print(f"PREORDER  {link.cache_id or '-'}  {_release_name(link)}  release_date={link.release_date or '-'}")
+
+
+def _print_incomplete(link) -> None:
+    print(
+        f"INCOMPLETE  {link.cache_id or '-'}  {_release_name(link)}  "
+        f"expected={link.expected_track_count or 0} available={len(link.tracks)}"
+    )
+
+
+def _print_dry_run_item(status: str, link, client: BandcampClient, download_folder: Path) -> None:
+    layout = client.target_layout(download_folder, link)
+    print(f"{status}  {link.cache_id or '-'}  {link.title}")
+    print(f"  FOLDER  {layout.folder}")
+    for path in layout.files:
+        print(f"  FILE  {path}")
 
 
 def _format_elapsed(seconds: float) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
+from typing import Iterable
 
 
 CACHE_FILENAME = "bandcamp-collection-downloader.cache"
@@ -28,6 +29,12 @@ class LegacyCache:
 
     def has(self, cache_id: str | None) -> bool:
         return bool(cache_id and cache_id in self.ids)
+
+    def find(self, cache_ids: Iterable[str | None]) -> str | None:
+        for cache_id in cache_ids:
+            if self.has(cache_id):
+                return cache_id
+        return None
 
     def append(self, cache_id: str | None, description: str) -> None:
         if not cache_id:

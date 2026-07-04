@@ -34,20 +34,34 @@ albums cannot be downloaded.
   <download-folder>/bandcamp-collection-downloader.cache
   ```
 
-- Cache IDs use the original `p<sitem_id>` format.
+- Cache IDs preserve the original Java format, including `p...` and `r...`
+  Bandcamp sale-item IDs.
+- Downloads are written to the Java-style library layout:
+
+  ```text
+  <download-folder>/<Artist>/<YYYY - Album>/
+  ```
+
 - Atomic cache appends with locking, flush, and `fsync()`.
 - `--jobs` bounded parallel downloads.
 - Interrupted downloads resume automatically using `.part` files and HTTP
   `Range` requests when supported.
 - Completed downloads are renamed from `.part` only after the transfer
   completes.
+- Pre-orders and incomplete releases are skipped by default and are never added
+  to the legacy cache.
 - Retry policy for `429`, `500`, `502`, `503`, `504`, and network timeout-style
   failures.
 - Dry-run output that shows cache behavior:
 
   ```text
   SKIP  p375739204  Example Album
+    FOLDER  /music/bandcamp/Example Artist/2026 - Example Album
+    FILE  /music/bandcamp/Example Artist/2026 - Example Album/Example Artist - Example Album - 01 Example Track.mp3
+  PREORDER  p390100000  Example Artist - Future Album  release_date=2026-12-01
   DOWNLOAD  p390186728  Another Album
+    FOLDER  /music/bandcamp/Another Artist/2026 - Another Album
+    FILE  /music/bandcamp/Another Artist/2026 - Another Album/cover.jpg
   ```
 
 ## Requirements
@@ -96,6 +110,14 @@ Choose a format:
 
 ```bash
 bandcamp_collection_downloader -f=flac --download-folder=/path/to/music <bandcamp-user>
+```
+
+Pre-orders are skipped by default so preview-track downloads do not poison the
+cache before the full release is available. To attempt them anyway without
+adding them to the cache:
+
+```bash
+bandcamp_collection_downloader --include-preorders --download-folder=/path/to/music <bandcamp-user>
 ```
 
 Run a dry-run first:
@@ -174,11 +196,13 @@ The cache file is intentionally compatible with the original Java tool:
 
 ```text
 p375739204| "Example Album" (2026) by Example Artist
+r173055461| "Older Example Album" (2019) by Example Artist
 ```
 
-The downloader uses `p<sitem_id>` as the primary duplicate check before
-filename matching. Cache entries are appended only after a download completes
-successfully and the `.part` file has been renamed.
+The downloader uses the Bandcamp sale-item cache ID as the primary duplicate
+check before filename matching. When Bandcamp only exposes a raw `sitem_id`, it
+falls back to `p<sitem_id>` for compatibility. Cache entries are appended only
+after a download completes successfully and the `.part` file has been renamed.
 
 This lets an existing Bandcamp library switch between the Java downloader and
 this Python implementation without losing cache history.
@@ -189,14 +213,24 @@ Dry-run with `--verbose`:
 
 ```text
 Loaded cache: 430 entries
+PREORDER  p390100000  Example Artist - Future Album  release_date=2026-12-01
 SKIP  p375739204  Example Album
+  FOLDER  /music/bandcamp/Example Artist/2026 - Example Album
+  FILE  /music/bandcamp/Example Artist/2026 - Example Album/Example Artist - Example Album - 01 Example Track.mp3
 DOWNLOAD  p390186728  Another Album
+  FOLDER  /music/bandcamp/Another Artist/2026 - Another Album
+  FILE  /music/bandcamp/Another Artist/2026 - Another Album/Another Artist - Another Album - 01 First Track.mp3
+  FILE  /music/bandcamp/Another Artist/2026 - Another Album/cover.jpg
 DOWNLOAD  p390237414  Third Album
+  FOLDER  /music/bandcamp/Third Artist/2026 - Third Album
+  FILE  /music/bandcamp/Third Artist/2026 - Third Album/Third Artist - Third Album - 01 First Track.mp3
 Collection items: 433
 Already downloaded: 430
 New downloads: 3
 Succeeded: 0
 Failed: 0
+Preorders skipped: 1
+Incomplete skipped: 0
 Elapsed: 00:00:02
 ```
 
