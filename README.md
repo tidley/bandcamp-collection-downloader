@@ -171,6 +171,40 @@ Use `--allow-weak-cookies` to continue without them.
 Verbose mode prints profiles considered, scores, chosen profile, and loaded
 cookie names.
 
+## Client Challenges
+
+Bandcamp may return an HTTP 200 page titled `Client Challenge` to Python even
+when the same account works in Firefox. This is expected when a normal Python
+HTTP client does not match Firefox's browser, TLS, JavaScript, and challenge
+handling context; copying cookies does not reproduce that context.
+
+The downloader reports this separately and never treats it as an empty
+collection or updates the download cache. It does not attempt to defeat the
+challenge. Complete any challenge in Firefox and retry using that authenticated
+Firefox profile, or provide a user-exported authenticated `cookies.sqlite`
+with `--cookies-sqlite`.
+
+When copied cookies are not enough, install the optional Playwright backend and
+its managed Firefox build:
+
+```bash
+pip install '.[browser]'
+playwright install firefox
+```
+
+Then use a disposable, visible Firefox session that imports the selected
+Bandcamp cookies without modifying the original Firefox profile:
+
+```bash
+bandcamp_collection_downloader --backend browser --download-folder=/path/to/music <bandcamp-user>
+```
+
+If Bandcamp presents a challenge, complete it yourself in the opened Firefox
+window and press Enter in the terminal. The downloader does not solve or bypass
+the challenge. `--backend auto` keeps urllib as the first choice and starts the
+browser backend only after urllib receives a client challenge. Use
+`--browser-headless` only where interactive verification is not needed.
+
 ## Formats
 
 Common Bandcamp formats are supported:

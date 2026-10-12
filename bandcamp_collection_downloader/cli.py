@@ -5,7 +5,8 @@ import sys
 import time
 from pathlib import Path
 
-from .bandcamp import BandcampClient, DownloadSummary
+from .bandcamp import BandcampAuthenticationError, BandcampChallengeError, BandcampClient, CollectionParsingError, DownloadSummary
+from .browser_backend import BrowserBackendUnavailable, BrowserSessionHttp, BrowserVerificationRequired
 from .cache import LegacyCache
 from .cookies import discover_firefox_profiles, load_firefox_cookies
 from .http_client import BrowserHttp
@@ -24,6 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jobs", type=int, default=4, help="Parallel download jobs.")
     parser.add_argument("-f", "--format", default="mp3-320", help="Download format, e.g. mp3-320, flac, aac-hi, vorbis.")
     parser.add_argument("--include-preorders", action="store_true", help="Attempt preorders/incomplete releases instead of skipping them up front.")
+    parser.add_argument("--backend", choices=("urllib", "browser", "auto"), default="urllib", help="Collection backend; browser uses Playwright Firefox, auto falls back after a client challenge.")
+    parser.add_argument("--browser-headless", action="store_true", help="Run the Playwright Firefox backend headlessly; interactive challenge verification will be unavailable.")
     parser.add_argument("--dry-run", action="store_true", help="Authenticate and list discovered downloads without downloading.")
     parser.add_argument("--verbose", action="store_true", help="Print profile, cookie, HTTP, and API diagnostics.")
     args = parser.parse_args(argv)
@@ -48,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
             log=log,
         )
     except Exception as exc:
-        print(f"cookie load failed: {exc}", file=sys.stderr)
+        print(f"authentication failed: could not load authenticated cookies: {exc}", file=sys.stderr)
         return 2
 
     log(f"cookie source: {cookies.source_db}")
@@ -59,34 +62,88 @@ def main(argv: list[str] | None = None) -> int:
     if cookies.skipped:
         log("cookies skipped: " + ", ".join(f"{name}={count}" for name, count in sorted(cookies.skipped.items())))
 
-    client = BandcampClient(BrowserHttp(cookies.jar), log, args.format)
-    links = client.find_downloads(endpoints=args.endpoint, username=args.username or args.fan)
-    if not links:
-        print("no Bandcamp downloads found; rerun with --verbose and send the diagnostics from this machine", file=sys.stderr)
+    http = None
+    try:
+        if args.backend == "browser":
+            http = _browser_http(cookies.jar, args.browser_headless)
+            client = BandcampClient(http, log, args.format)
+            links = client.find_downloads(endpoints=args.endpoint, username=args.username or args.fan)
+        else:
+            http = BrowserHttp(cookies.jar)
+            client = BandcampClient(http, log, args.format)
+            try:
+                links = client.find_downloads(endpoints=args.endpoint, username=args.username or args.fan)
+            except BandcampChallengeError:
+                if args.backend != "auto":
+                    raise
+                print("client challenge received from urllib; retrying with the browser backend", file=sys.stderr)
+                http = _browser_http(cookies.jar, args.browser_headless)
+                client = BandcampClient(http, log, args.format)
+                links = client.find_downloads(endpoints=args.endpoint, username=args.username or args.fan)
+    except BrowserBackendUnavailable as exc:
+        _close_http(http)
+        print(f"browser backend unavailable: {exc}", file=sys.stderr)
+        return 2
+    except BrowserVerificationRequired as exc:
+        _close_http(http)
+        print(f"browser verification required: {exc}", file=sys.stderr)
+        return 1
+    except BandcampAuthenticationError as exc:
+        _close_http(http)
+        print(f"authentication failed: {exc}", file=sys.stderr)
+        return 1
+    except BandcampChallengeError as exc:
+        _close_http(http)
+        print(f"client challenge received: {exc}", file=sys.stderr)
+        return 1
+    except CollectionParsingError as exc:
+        _close_http(http)
+        print(f"collection parsing failed: {exc}", file=sys.stderr)
         return 1
 
-    plan = client.plan_downloads(links, cache, include_preorders=args.include_preorders)
-    for link in plan.preorders:
-        _print_preorder(link)
-    for link in plan.incomplete:
-        _print_incomplete(link)
-    if args.dry_run:
-        for link in plan.skipped:
-            _print_dry_run_item("SKIP", link, client, args.download_folder)
-        for link in plan.pending:
-            _print_dry_run_item("DOWNLOAD", link, client, args.download_folder)
-        _print_summary(plan.summary, time.monotonic() - started)
-        return 0
+    try:
+        if not links:
+            print("collection genuinely empty: Bandcamp returned an authenticated collection with zero releases", file=sys.stderr)
+            return 1
 
-    summary = client.download_plan(plan, args.download_folder, args.jobs, cache)
-    _print_summary(summary, time.monotonic() - started)
-    return 0 if summary.failed == 0 and (
-        summary.succeeded
-        or summary.already_downloaded
-        or summary.duplicates
-        or summary.preorders_skipped
-        or summary.incomplete_skipped
-    ) else 1
+        plan = client.plan_downloads(links, cache, include_preorders=args.include_preorders)
+        for link in plan.preorders:
+            _print_preorder(link)
+        for link in plan.incomplete:
+            _print_incomplete(link)
+        if args.dry_run:
+            for link in plan.skipped:
+                _print_dry_run_item("SKIP", link, client, args.download_folder)
+            for link in plan.pending:
+                _print_dry_run_item("DOWNLOAD", link, client, args.download_folder)
+            _print_summary(plan.summary, time.monotonic() - started)
+            return 0
+
+        summary = client.download_plan(plan, args.download_folder, args.jobs, cache)
+        _print_summary(summary, time.monotonic() - started)
+        return 0 if summary.failed == 0 and (
+            summary.succeeded
+            or summary.already_downloaded
+            or summary.duplicates
+            or summary.preorders_skipped
+            or summary.incomplete_skipped
+        ) else 1
+    finally:
+        _close_http(http)
+
+
+def _browser_http(cookiejar, headless: bool) -> BrowserSessionHttp:
+    return BrowserSessionHttp(
+        cookiejar,
+        headless=headless,
+        notify=lambda message: print(message, file=sys.stderr),
+    )
+
+
+def _close_http(http) -> None:
+    close = getattr(http, "close", None)
+    if close:
+        close()
 
 
 def _list_profiles() -> int:

@@ -1,10 +1,15 @@
 import html
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from bandcamp_collection_downloader.bandcamp import (
+    BandcampChallengeError,
     BandcampClient,
     extension_for_format,
     normalize_format,
@@ -16,9 +21,45 @@ from bandcamp_collection_downloader.bandcamp import (
 )
 from bandcamp_collection_downloader.filenames import sanitize_filename, unique_path
 from bandcamp_collection_downloader.http_client import HttpResult
+from bandcamp_collection_downloader import cli
 
 
 class BandcampTests(unittest.TestCase):
+    def test_client_challenge_page_raises_dedicated_error(self):
+        fixture = Path(__file__).parent / "fixtures" / "client_challenge.html"
+        http = StaticHttp(fixture.read_bytes())
+        client = BandcampClient(http, lambda _: None)
+
+        with self.assertRaisesRegex(BandcampChallengeError, "Client Challenge"):
+            client.find_downloads(username="example-user")
+
+        self.assertEqual(http.requests, 1)
+
+    def test_cli_reports_client_challenge_without_creating_cache(self):
+        fixture = Path(__file__).parent / "fixtures" / "client_challenge.html"
+        cookies = SimpleNamespace(
+            jar=None,
+            source_db=Path("cookies.sqlite"),
+            copied_db=Path("temporary-cookies.sqlite"),
+            loaded_count=2,
+            loaded_names=("identity", "js_logged_in"),
+            has_identity=True,
+            has_js_logged_in=True,
+            skipped={},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(cli, "load_firefox_cookies", return_value=cookies),
+                mock.patch.object(cli, "BrowserHttp", return_value=StaticHttp(fixture.read_bytes())),
+                redirect_stderr(stderr),
+            ):
+                status = cli.main(["--download-folder", tmp, "example-user"])
+
+            self.assertEqual(status, 1)
+            self.assertIn("client challenge received:", stderr.getvalue())
+            self.assertFalse((Path(tmp) / "bandcamp-collection-downloader.cache").exists())
+
     def test_discovers_collection_api_endpoint_from_page(self):
         endpoints = _collection_api_endpoints_from_text(
             r'{"url":"\/api\/fancollection\/3\/collection_items"} https://bandcamp.com/api/fancollection/4/collection_items',
@@ -274,6 +315,14 @@ def _json_response(url, body):
         headers = {"Content-Type": "text/html"}
     return HttpResult(url=url, final_url=url, status=200, headers=headers, body=body)
 
+class StaticHttp:
+    def __init__(self, body):
+        self.body = body
+        self.requests = 0
+
+    def request(self, url, **_kwargs):
+        self.requests += 1
+        return HttpResult(url=url, final_url=url, status=200, headers={"Content-Type": "text/html"}, body=self.body)
 
 if __name__ == "__main__":
     unittest.main()

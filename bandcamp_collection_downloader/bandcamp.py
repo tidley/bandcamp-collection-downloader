@@ -41,6 +41,29 @@ AUDIO_EXTENSIONS = {f".{extension}" for extension in FORMAT_EXTENSIONS.values()}
 COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
+class BandcampAuthenticationError(RuntimeError):
+    """Bandcamp did not accept the supplied authenticated session."""
+
+
+class BandcampChallengeError(RuntimeError):
+    """Bandcamp returned an anti-bot client challenge instead of collection data."""
+
+    def __init__(self, response: HttpResult, *, context: str):
+        self.status = response.status
+        self.url = response.final_url
+        self.context = context
+        super().__init__(
+            f"{context} returned Bandcamp's Client Challenge (HTTP {response.status}, {response.final_url}). "
+            "Cookies alone do not reproduce Firefox's browser session or challenge handling. "
+            "Complete the challenge in Firefox, then retry with that profile or a user-provided authenticated cookie export; "
+            "this downloader does not attempt to bypass Bandcamp's anti-bot protection."
+        )
+
+
+class CollectionParsingError(RuntimeError):
+    """A non-challenge Bandcamp response could not be interpreted as collection data."""
+
+
 @dataclass(frozen=True)
 class TrackInfo:
     title: str
@@ -128,13 +151,23 @@ class BandcampClient:
         response = self._fetch_html(start_url)
         self._log_response("auth/page", response)
 
+        if _is_client_challenge(response):
+            raise BandcampChallengeError(response, context="collection page")
         if self._looks_logged_out(response):
-            self.log("auth failed: response looks logged out")
-            return []
+            raise BandcampAuthenticationError(
+                f"collection page was not authenticated (HTTP {response.status}, {response.final_url})"
+            )
 
         page_data = _pagedata_from_text(response.text)
         collection_state = _collection_state_from_pagedata(page_data)
         links = list(_download_links_from_text(response.text, response.final_url))
+        if not collection_state and not links:
+            raise CollectionParsingError(
+                f"collection page did not contain usable collection data (HTTP {response.status}, {response.final_url})"
+            )
+        if collection_state and collection_state.item_count == 0 and collection_state.initial_count == 0 and not links:
+            self.log("collection bootstrap confirms an empty collection")
+            return []
         fan_id = _extract_fan_id_from_pagedata(page_data) or _extract_fan_id(response.text)
         self.log(f"fan_id found: {fan_id or 'no; API requests will omit fan_id'}")
         if collection_state:
@@ -380,15 +413,22 @@ class BandcampClient:
             offset = seen_items
             response = self.http.request(endpoint, method="POST", json_data=payload, referer=referer)
             self._log_response(f"api {endpoint} page {page}", response)
+            if _is_client_challenge(response):
+                raise BandcampChallengeError(response, context="collection API")
+            if self._looks_logged_out(response):
+                raise BandcampAuthenticationError(
+                    f"collection API was not authenticated (HTTP {response.status}, {response.final_url})"
+                )
             if response.status != 200:
-                stop_reason = f"HTTP {response.status}"
-                break
+                raise CollectionParsingError(
+                    f"collection API returned HTTP {response.status} ({response.final_url})"
+                )
             try:
                 data = json.loads(response.text)
             except json.JSONDecodeError:
-                self.log(f"api parse failed: {response.excerpt()}")
-                stop_reason = "invalid JSON"
-                break
+                raise CollectionParsingError(
+                    f"collection API returned invalid JSON ({response.final_url}): {response.excerpt()}"
+                ) from None
 
             page_links = _download_links_from_json(data, endpoint, self.download_format)
             raw_items = _collection_api_item_count(data) or len(page_links)
@@ -434,6 +474,11 @@ class BandcampClient:
             return True
         parsed = urllib.parse.urlsplit(response.final_url)
         return parsed.path.startswith("/login")
+
+
+def _is_client_challenge(response: HttpResult) -> bool:
+    title = re.search(r"<title[^>]*>\s*Client\s+Challenge\s*</title>", response.text, re.IGNORECASE)
+    return bool(title)
 
 
 def _download_links_from_text(text: str, source: str) -> list[DownloadLink]:
