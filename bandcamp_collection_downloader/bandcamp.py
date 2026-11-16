@@ -8,6 +8,7 @@ import time
 import urllib.parse
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date
 from email.utils import parsedate_to_datetime
@@ -64,6 +65,10 @@ class CollectionParsingError(RuntimeError):
     """A non-challenge Bandcamp response could not be interpreted as collection data."""
 
 
+class NoDigitalDownload(RuntimeError):
+    """Bandcamp explicitly identifies a physical purchase without digital audio."""
+
+
 @dataclass(frozen=True)
 class TrackInfo:
     title: str
@@ -117,6 +122,7 @@ class DownloadSummary:
     duplicates: int = 0
     preorders_skipped: int = 0
     incomplete_skipped: int = 0
+    physical_only_skipped: int = 0
 
 
 @dataclass
@@ -141,9 +147,10 @@ class ExtractedArchive:
 
 
 class BandcampClient:
-    def __init__(self, http: BrowserHttp, log, download_format: str = DEFAULT_FORMAT):
+    def __init__(self, http: BrowserHttp, log, download_format: str = DEFAULT_FORMAT, *, report=None):
         self.http = http
         self.log = log
+        self.report = report or log
         self.download_format = normalize_format(download_format)
 
     def find_downloads(self, *, endpoints: list[str] | None = None, username: str | None = None) -> list[DownloadLink]:
@@ -220,6 +227,19 @@ class BandcampClient:
         if resolved:
             return DownloadLink(resolved, link.title, response.final_url)
 
+        data = _pagedata_from_text(response.text)
+        items = data.get("download_items")
+        if data.get("has_downloads") is False and isinstance(items, list) and items and all(
+            isinstance(item, dict) and item.get("type") == "package" and item.get("includes_digital") is False
+            for item in items
+        ):
+            descriptions = "; ".join(str(item.get("package_title") or link.title) for item in items)
+            raise NoDigitalDownload(descriptions)
+
+        self.report(
+            f"FAILED  {link.cache_id or '-'}  {link.artist or 'Unknown Artist'} - {link.title}: "
+            f"no {self.download_format} download link found (HTTP {response.status})"
+        )
         self.log(f"no {self.download_format} link found for {link.title}: {response.excerpt()}")
         return None
 
@@ -281,16 +301,26 @@ class BandcampClient:
 
         done = 0
         failed = 0
-        with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-            futures = [pool.submit(self._download_one, link, out_dir, cache) for link in plan.pending]
-            for future in as_completed(futures):
-                result = future.result()
+        parallel = getattr(self.http, "supports_parallel_downloads", True)
+        if not parallel:
+            self.log("Browser backend: downloading sequentially on the browser session thread.")
+        with ThreadPoolExecutor(max_workers=max(1, jobs)) if parallel else nullcontext() as pool:
+            if parallel:
+                futures = [pool.submit(self._download_one, link, out_dir, cache) for link in plan.pending]
+                results = (future.result() for future in as_completed(futures))
+            else:
+                # Even a single executor worker is a different thread: Playwright
+                # must be called on the thread that created its session.
+                results = (self._download_one(link, out_dir, cache) for link in plan.pending)
+            for result in results:
                 if result == "success":
                     done += 1
                 elif result == "incomplete":
                     summary.incomplete_skipped += 1
                 elif result == "preorder":
                     summary.preorders_skipped += 1
+                elif result == "physical-only":
+                    summary.physical_only_skipped += 1
                 else:
                     failed += 1
         summary.succeeded = done
@@ -306,7 +336,11 @@ class BandcampClient:
         return TargetLayout(folder=folder, files=tuple(files))
 
     def _download_one(self, link: DownloadLink, out_dir: Path, cache: LegacyCache | None) -> str:
-        resolved = self.resolve_download(link)
+        try:
+            resolved = self.resolve_download(link)
+        except NoDigitalDownload as exc:
+            self.report(f"PHYSICAL ONLY  {link.cache_id or '-'}  {link.artist or 'Unknown Artist'} - {exc}: no digital download included")
+            return "physical-only"
         if not resolved:
             return "incomplete" if _is_metadata_incomplete(link) else "failed"
 

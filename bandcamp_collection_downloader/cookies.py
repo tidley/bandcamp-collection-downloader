@@ -271,6 +271,10 @@ def _cookie_from_row(row: sqlite3.Row, now: int, skipped: Counter[str]) -> Cooki
         return None
 
     expires = int(row["expiry"] or 0)
+    # Some Firefox databases store milliseconds rather than Unix seconds.
+    # Values beyond year 9999 cannot be valid browser expiry seconds.
+    if expires > 253402300799:
+        expires //= 1000
     if expires and expires < now:
         skipped["expired"] += 1
         return None

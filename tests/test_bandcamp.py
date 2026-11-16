@@ -25,6 +25,43 @@ from bandcamp_collection_downloader import cli
 
 
 class BandcampTests(unittest.TestCase):
+    def test_physical_only_purchase_is_skipped_without_caching(self):
+        blob = {
+            "has_downloads": False,
+            "download_items": [{"type": "package", "includes_digital": False, "package_title": "Vinyl bundle"}],
+        }
+        body = f'<div id="pagedata" data-blob="{html.escape(json.dumps(blob), quote=True)}"></div>'.encode()
+        report = mock.Mock()
+        client = BandcampClient(StaticHttp(body), lambda _: None, report=report)
+        link = DownloadLink("https://bandcamp.com/download?sitem_id=123", "Offers", "https://bandcamp.com/fan", artist="Label")
+        cache = mock.Mock()
+        cache.find.return_value = None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = client.download_all([link], Path(tmp), jobs=4, cache=cache)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+        self.assertEqual(summary.physical_only_skipped, 1)
+        self.assertEqual(summary.failed, 0)
+        self.assertEqual(summary.succeeded, 0)
+        cache.append.assert_not_called()
+        self.assertIn("Vinyl bundle: no digital download included", report.call_args.args[0])
+
+    def test_missing_download_link_is_not_assumed_physical_only(self):
+        for data in ({}, {"has_downloads": False}, {
+            "has_downloads": False,
+            "download_items": [{"type": "package", "includes_digital": True}],
+        }):
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as tmp:
+                body = f'<div id="pagedata" data-blob="{html.escape(json.dumps(data), quote=True)}"></div>'.encode()
+                report = mock.Mock()
+                client = BandcampClient(StaticHttp(body), lambda _: None, report=report)
+                link = DownloadLink("https://bandcamp.com/download?sitem_id=123", "Album", "https://bandcamp.com/fan")
+                summary = client.download_all([link], Path(tmp), jobs=1)
+                self.assertEqual(summary.failed, 1)
+                self.assertEqual(summary.physical_only_skipped, 0)
+                self.assertIn("no mp3-320 download link found", report.call_args.args[0])
+
     def test_client_challenge_page_raises_dedicated_error(self):
         fixture = Path(__file__).parent / "fixtures" / "client_challenge.html"
         http = StaticHttp(fixture.read_bytes())

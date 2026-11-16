@@ -50,6 +50,8 @@ albums cannot be downloaded.
   completes.
 - Pre-orders and incomplete releases are skipped by default and are never added
   to the legacy cache.
+- Physical purchases explicitly marked by Bandcamp as having no included digital
+  download are reported as `PHYSICAL ONLY` and skipped without updating the cache.
 - Retry policy for `429`, `500`, `502`, `503`, `504`, and network timeout-style
   failures.
 - Dry-run output that shows cache behavior:
@@ -204,6 +206,13 @@ window and press Enter in the terminal. The downloader does not solve or bypass
 the challenge. `--backend auto` keeps urllib as the first choice and starts the
 browser backend only after urllib receives a client challenge. Use
 `--browser-headless` only where interactive verification is not needed.
+
+The browser backend automatically resolves download links in Firefox, then
+streams the files to disk using the browser's current cookies. Transfers show
+progress, resume `.part` files, and use an idle socket timeout rather than a
+two-minute limit for the whole file. Browser-backed releases are processed
+sequentially because Playwright must stay on its owning thread; `--jobs` still
+controls parallel downloads with the urllib backend.
 
 ## Formats
 

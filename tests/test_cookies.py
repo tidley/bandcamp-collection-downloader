@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from bandcamp_collection_downloader.cookies import copy_cookie_db, discover_firefox_profiles, load_firefox_cookies, read_cookie_db
 
@@ -22,6 +23,26 @@ class CookieTests(unittest.TestCase):
             self.assertEqual(skipped["invalid_domain"], 1)
             self.assertEqual(skipped["invalid_name"], 1)
             self.assertEqual(skipped["control_chars"], 1)
+            self.assertEqual(skipped["expired"], 1)
+
+    def test_millisecond_expiry_is_normalized_before_filtering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "cookies.sqlite"
+            future = int(time.time()) + 3600
+            past = int(time.time()) - 3600
+            self._make_cookie_db(db, rows=[
+                (".bandcamp.com", "identity", "abc", "/", future * 1000 + 123, 1, 0),
+                (".bandcamp.com", "js_logged_in", "1", "/", future, 1, 0),
+                (".bandcamp.com", "logout", "x", "/", past * 1000, 1, 0),
+                (".bandcamp.com", "download_encoding", "mp3-320", "/", 0, 1, 0),
+            ])
+
+            jar, names, skipped = read_cookie_db(db)
+
+            self.assertEqual(names, ["download_encoding", "identity", "js_logged_in"])
+            self.assertEqual({cookie.name: cookie.expires for cookie in jar}, {
+                "identity": future, "js_logged_in": future, "download_encoding": None,
+            })
             self.assertEqual(skipped["expired"], 1)
 
     def test_copy_cookie_db_copies_wal_and_shm(self):
@@ -72,6 +93,10 @@ class CookieTests(unittest.TestCase):
             self.assertEqual(profiles[0].path, profile)
 
     def test_auto_load_picks_highest_scoring_profile(self):
+        self.enterContext(mock.patch(
+            "bandcamp_collection_downloader.cookies.discover_firefox_profiles",
+            side_effect=lambda home: discover_firefox_profiles(home=home, uid=999999),
+        ))
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             weak_root = home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox"
@@ -97,6 +122,10 @@ class CookieTests(unittest.TestCase):
             self.assertTrue(any(f"chosen profile: {strong}" in line for line in logs))
 
     def test_requires_strong_cookies_unless_allowed(self):
+        self.enterContext(mock.patch(
+            "bandcamp_collection_downloader.cookies.discover_firefox_profiles",
+            side_effect=lambda home: discover_firefox_profiles(home=home, uid=999999),
+        ))
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             profile = self._make_profile(home / ".mozilla" / "firefox", "weak.default", default=True)

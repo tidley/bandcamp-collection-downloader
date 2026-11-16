@@ -38,6 +38,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.verbose:
             print(message, file=sys.stderr)
 
+    def report(message: str) -> None:
+        print(message, file=sys.stderr)
+
     started = time.monotonic()
     args.download_folder.mkdir(parents=True, exist_ok=True)
     cache = LegacyCache(args.download_folder, log)
@@ -66,11 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.backend == "browser":
             http = _browser_http(cookies.jar, args.browser_headless)
-            client = BandcampClient(http, log, args.format)
+            client = BandcampClient(http, log, args.format, report=report)
             links = client.find_downloads(endpoints=args.endpoint, username=args.username or args.fan)
         else:
             http = BrowserHttp(cookies.jar)
-            client = BandcampClient(http, log, args.format)
+            client = BandcampClient(http, log, args.format, report=report)
             try:
                 links = client.find_downloads(endpoints=args.endpoint, username=args.username or args.fan)
             except BandcampChallengeError:
@@ -78,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise
                 print("client challenge received from urllib; retrying with the browser backend", file=sys.stderr)
                 http = _browser_http(cookies.jar, args.browser_headless)
-                client = BandcampClient(http, log, args.format)
+                client = BandcampClient(http, log, args.format, report=report)
                 links = client.find_downloads(endpoints=args.endpoint, username=args.username or args.fan)
     except BrowserBackendUnavailable as exc:
         _close_http(http)
@@ -127,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             or summary.duplicates
             or summary.preorders_skipped
             or summary.incomplete_skipped
+            or summary.physical_only_skipped
         ) else 1
     finally:
         _close_http(http)
@@ -165,6 +169,7 @@ def _print_summary(summary: DownloadSummary, elapsed: float) -> None:
     print(f"Failed: {summary.failed}", file=sys.stderr)
     print(f"Preorders skipped: {summary.preorders_skipped}", file=sys.stderr)
     print(f"Incomplete skipped: {summary.incomplete_skipped}", file=sys.stderr)
+    print(f"Physical-only skipped: {summary.physical_only_skipped}", file=sys.stderr)
     print(f"Elapsed: {_format_elapsed(elapsed)}", file=sys.stderr)
 
 

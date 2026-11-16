@@ -5,11 +5,11 @@ import re
 import shutil
 import sys
 import tempfile
-from http.cookiejar import CookieJar
+from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
 from typing import Callable
 
-from .http_client import HttpResult
+from .http_client import BrowserHttp, HttpResult
 
 
 class BrowserBackendUnavailable(RuntimeError):
@@ -22,6 +22,8 @@ class BrowserVerificationRequired(RuntimeError):
 
 class BrowserSessionHttp:
     """HTTP transport backed by a disposable, interactive Playwright Firefox profile."""
+
+    supports_parallel_downloads = False
 
     def __init__(
         self,
@@ -108,23 +110,37 @@ class BrowserSessionHttp:
         )
 
     def download(self, url: str, destination: Path, *, referer: str | None = None) -> tuple[str, int, str | None]:
-        part = destination.with_suffix(destination.suffix + ".part")
-        existing = part.stat().st_size if part.exists() else 0
-        headers = {"Range": f"bytes={existing}-"} if existing else {}
-        if referer:
-            headers["Referer"] = referer
-        response = self._context.request.get(url, headers=headers, timeout=120_000)
-        body = response.body()
-        content_type = response.headers.get("content-type", "")
-        if "text/html" in content_type:
-            return response.url, 0, f"unexpected HTML response: {' '.join(body[:800].decode(errors='replace').split())}"
-        if not response.ok:
-            return response.url, 0, f"HTTP {response.status}: {' '.join(body[:800].decode(errors='replace').split())}"
-        mode = "ab" if existing and response.status == 206 else "wb"
-        with part.open(mode) as fh:
-            fh.write(body)
-        part.replace(destination)
-        return response.url, destination.stat().st_size, None
+        # Playwright's APIRequestContext buffers the entire response and applies
+        # one timeout to the whole transfer. Stream signed file URLs instead,
+        # preserving the browser's current cookies and resumable .part files.
+        jar = CookieJar()
+        for item in self._context.cookies():
+            expires = item.get("expires", -1)
+            jar.set_cookie(Cookie(
+                version=0, name=item["name"], value=item["value"],
+                port=None, port_specified=False,
+                domain=item["domain"], domain_specified=item["domain"].startswith("."),
+                domain_initial_dot=item["domain"].startswith("."),
+                path=item.get("path") or "/", path_specified=True,
+                secure=item.get("secure", False),
+                expires=expires if expires > 0 else None, discard=expires <= 0,
+                comment=None, comment_url=None,
+                rest={"HttpOnly": None} if item.get("httpOnly") else {}, rfc2109=False,
+            ))
+        self._notify(f"Downloading: {destination.parent.name} / {destination.name}")
+
+        def progress(received: int, total: int | None) -> None:
+            amount = f"{received / (1024 * 1024):.1f} MiB"
+            if total is not None:
+                amount += f" / {total / (1024 * 1024):.1f} MiB"
+            self._notify(f"  Transfer: {amount}")
+
+        result = BrowserHttp(jar).download(url, destination, referer=referer, progress=progress)
+        if result[2]:
+            self._notify(f"Download failed: {destination.parent.name}: {result[2]}")
+        else:
+            self._notify(f"Saved: {destination}")
+        return result
 
     def _verify_if_needed(self, result: HttpResult) -> HttpResult:
         if not _is_client_challenge(result.text):

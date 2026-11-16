@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from http.client import IncompleteRead
 import re
 import socket
 import time
@@ -10,6 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
 from pathlib import Path
+from typing import Callable
 
 
 DEFAULT_HEADERS = {
@@ -102,7 +104,10 @@ class BrowserHttp:
                 return HttpResult(url=url, final_url=url, status=0, headers={}, body=b"", error=str(exc))
         return HttpResult(url=url, final_url=url, status=0, headers={}, body=b"", error="retry loop exhausted")
 
-    def download(self, url: str, destination: Path, *, referer: str | None = None) -> tuple[str, int, str | None]:
+    def download(
+        self, url: str, destination: Path, *, referer: str | None = None,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> tuple[str, int, str | None]:
         destination.parent.mkdir(parents=True, exist_ok=True)
         for attempt in range(len(RETRY_DELAYS) + 1):
             part = destination.with_suffix(destination.suffix + ".part")
@@ -123,14 +128,26 @@ class BrowserHttp:
                         return response.geturl(), 0, f"unexpected HTML response: {' '.join(body.split())}"
                     mode = "ab" if existing and response.getcode() == 206 else "wb"
                     total = existing if mode == "ab" else 0
+                    length = response.headers.get("Content-Length")
+                    expected = total + int(length) if length is not None else None
+                    last_progress = time.monotonic()
+                    if progress:
+                        progress(total, expected)
                     with part.open(mode) as fh:
                         while True:
-                            chunk = response.read(1024 * 256)
+                            chunk = response.read(1024 * 64)
                             if not chunk:
                                 break
                             fh.write(chunk)
                             total += len(chunk)
+                            if progress and time.monotonic() - last_progress >= 5:
+                                progress(total, expected)
+                                last_progress = time.monotonic()
+                    if expected is not None and total != expected:
+                        raise IncompleteRead(b"", expected - total)
                     part.replace(destination)
+                    if progress:
+                        progress(total, expected)
                     return response.geturl(), total, None
             except urllib.error.HTTPError as exc:
                 if exc.code in RETRY_STATUSES and attempt < len(RETRY_DELAYS):
@@ -138,7 +155,7 @@ class BrowserHttp:
                     continue
                 body = exc.read(800).decode("utf-8", errors="replace")
                 return url, 0, f"HTTP {exc.code}: {' '.join(body.split())}"
-            except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            except (urllib.error.URLError, TimeoutError, socket.timeout, IncompleteRead) as exc:
                 if attempt < len(RETRY_DELAYS):
                     _sleep(attempt)
                     continue

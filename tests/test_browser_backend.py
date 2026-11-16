@@ -1,14 +1,71 @@
 import html
 import json
+import threading
 import unittest
 from http.cookiejar import Cookie, CookieJar
+from pathlib import Path
 from unittest import mock
 
-from bandcamp_collection_downloader.bandcamp import BandcampClient
+from bandcamp_collection_downloader.bandcamp import BandcampClient, DownloadPlan, DownloadSummary
 from bandcamp_collection_downloader.browser_backend import BrowserSessionHttp
 
 
 class BrowserBackendIntegrationTests(unittest.TestCase):
+    def test_file_transfer_streams_with_current_browser_cookies(self):
+        browser = FakePlaywright(_collection_page())
+        notify = mock.Mock()
+        with mock.patch("bandcamp_collection_downloader.browser_backend._sync_playwright", return_value=browser):
+            http = BrowserSessionHttp(CookieJar(), headless=True, notify=notify)
+            # Include cookies created after browser startup, not just imported ones.
+            browser.context.cookies = mock.Mock(return_value=[{
+                "name": "identity", "value": "refreshed-session", "domain": ".bandcamp.com",
+                "path": "/", "expires": -1, "secure": True, "httpOnly": True,
+            }])
+            try:
+                with mock.patch("bandcamp_collection_downloader.browser_backend.BrowserHttp") as transport:
+                    target = Path("release/archive.zip")
+                    transport.return_value.download.return_value = ("https://files.test/archive", 123, None)
+                    result = http.download("https://files.test/archive", target, referer="https://bandcamp.com/download")
+
+                cookie = list(transport.call_args.args[0])[0]
+                self.assertEqual(cookie.value, "refreshed-session")
+                self.assertIsNone(cookie.expires)
+                self.assertTrue(cookie.has_nonstandard_attr("HttpOnly"))
+                call = transport.return_value.download.call_args
+                self.assertEqual(call.args, ("https://files.test/archive", target))
+                self.assertEqual(call.kwargs["referer"], "https://bandcamp.com/download")
+                call.kwargs["progress"](1048576, 2097152)
+                notify.assert_called_with("  Transfer: 1.0 MiB / 2.0 MiB")
+                self.assertEqual(result[1:], (123, None))
+            finally:
+                http.close()
+
+    def test_download_plan_keeps_browser_calls_on_owning_thread(self):
+        browser = FakePlaywright(_collection_page())
+        owner = threading.get_ident()
+        with mock.patch("bandcamp_collection_downloader.browser_backend._sync_playwright", return_value=browser):
+            http = BrowserSessionHttp(CookieJar(), headless=True)
+            try:
+                client = BandcampClient(http, lambda _: None)
+                statuses = iter(["success", "failed", "incomplete", "preorder"])
+
+                def download(link, out_dir, cache):
+                    self.assertEqual(threading.get_ident(), owner)
+                    http.request("https://bandcamp.com/example-user")
+                    return next(statuses)
+
+                plan = DownloadPlan([mock.sentinel.link] * 4, [], [], [], DownloadSummary(new_downloads=4))
+                with mock.patch.object(client, "_download_one", side_effect=download):
+                    summary = client.download_plan(plan, Path("unused"), jobs=4)
+            finally:
+                http.close()
+
+        self.assertEqual(len(browser.context.page.gotos), 4)
+        self.assertEqual(summary.succeeded, 1)
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(summary.incomplete_skipped, 1)
+        self.assertEqual(summary.preorders_skipped, 1)
+
     def test_browser_session_discovers_bootstrap_collection_and_uses_browser_fetch(self):
         browser = FakePlaywright(_collection_page())
         jar = CookieJar()

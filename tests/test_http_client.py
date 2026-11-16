@@ -34,6 +34,26 @@ class HttpClientTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"oldnew")
             self.assertEqual(client.opener.ranges, ["bytes=3-"])
 
+    def test_truncated_download_retries_from_partial_file_and_reports_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "file.zip"
+            first = FakeResponse(200, b"first")
+            first.headers["Content-Length"] = "11"
+            second = FakeResponse(206, b"second")
+            second.headers["Content-Length"] = "6"
+            client = BrowserHttp(None)
+            client.opener = FakeOpener([first, second])
+            progress = mock.Mock()
+
+            with mock.patch("bandcamp_collection_downloader.http_client.time.sleep"):
+                _, size, error = client.download("https://example.test/file", target, progress=progress)
+
+            self.assertIsNone(error)
+            self.assertEqual(size, 11)
+            self.assertEqual(target.read_bytes(), b"firstsecond")
+            self.assertEqual(client.opener.ranges, [None, "bytes=5-"])
+            self.assertEqual(progress.call_args_list, [mock.call(0, 11), mock.call(5, 11), mock.call(11, 11)])
+
 
 class FakeOpener:
     def __init__(self, responses):
